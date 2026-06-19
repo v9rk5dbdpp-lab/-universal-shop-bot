@@ -9,6 +9,17 @@ def get_connection():
     return sqlite3.connect(DB_PATH)
 
 
+def column_exists(cursor, table_name: str, column_name: str) -> bool:
+    cursor.execute(f"PRAGMA table_info({table_name})")
+    columns = cursor.fetchall()
+    return any(column[1] == column_name for column in columns)
+
+
+def add_column_if_missing(cursor, table_name: str, column_name: str, column_sql: str):
+    if not column_exists(cursor, table_name, column_name):
+        cursor.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_sql}")
+
+
 def init_db():
     connection = get_connection()
     cursor = connection.cursor()
@@ -39,20 +50,29 @@ def init_db():
         )
     """)
 
+    add_column_if_missing(cursor, "products", "digital_content", "digital_content TEXT")
+    add_column_if_missing(cursor, "orders", "digital_content", "digital_content TEXT")
+
     connection.commit()
     connection.close()
 
 
-def add_product(name: str, category: str, price: int, description: str = ""):
+def add_product(
+    name: str,
+    category: str,
+    price: int,
+    description: str = "",
+    digital_content: str = "",
+):
     connection = get_connection()
     cursor = connection.cursor()
 
     cursor.execute(
         """
-        INSERT INTO products (name, category, description, price)
-        VALUES (?, ?, ?, ?)
+        INSERT INTO products (name, category, description, price, digital_content)
+        VALUES (?, ?, ?, ?, ?)
         """,
-        (name, category, description, price),
+        (name, category, description, price, digital_content),
     )
 
     connection.commit()
@@ -65,7 +85,7 @@ def get_all_products():
 
     cursor.execute(
         """
-        SELECT id, name, category, description, price
+        SELECT id, name, category, description, price, digital_content
         FROM products
         WHERE is_active = 1
         ORDER BY id DESC
@@ -85,7 +105,7 @@ def get_product_by_id(product_id: int):
 
     cursor.execute(
         """
-        SELECT id, name, category, description, price
+        SELECT id, name, category, description, price, digital_content
         FROM products
         WHERE id = ? AND is_active = 1
         """,
@@ -126,7 +146,7 @@ def create_order(
     if not product:
         return None
 
-    _, name, _, _, price = product
+    _, name, _, _, price, digital_content = product
 
     connection = get_connection()
     cursor = connection.cursor()
@@ -139,9 +159,10 @@ def create_order(
             product_price,
             buyer_telegram_id,
             buyer_username,
-            buyer_full_name
+            buyer_full_name,
+            digital_content
         )
-        VALUES (?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
         """,
         (
             product_id,
@@ -150,6 +171,7 @@ def create_order(
             buyer_telegram_id,
             buyer_username,
             buyer_full_name,
+            digital_content,
         ),
     )
 
@@ -174,7 +196,8 @@ def get_all_orders(limit: int = 20):
             buyer_username,
             buyer_full_name,
             status,
-            created_at
+            created_at,
+            digital_content
         FROM orders
         ORDER BY id DESC
         LIMIT ?
@@ -186,3 +209,48 @@ def get_all_orders(limit: int = 20):
     connection.close()
 
     return orders
+
+
+def get_order_by_id(order_id: int):
+    connection = get_connection()
+    cursor = connection.cursor()
+
+    cursor.execute(
+        """
+        SELECT
+            id,
+            product_name,
+            product_price,
+            buyer_telegram_id,
+            buyer_username,
+            buyer_full_name,
+            status,
+            created_at,
+            digital_content
+        FROM orders
+        WHERE id = ?
+        """,
+        (order_id,),
+    )
+
+    order = cursor.fetchone()
+    connection.close()
+
+    return order
+
+
+def mark_order_done(order_id: int):
+    connection = get_connection()
+    cursor = connection.cursor()
+
+    cursor.execute(
+        """
+        UPDATE orders
+        SET status = 'done'
+        WHERE id = ?
+        """,
+        (order_id,),
+    )
+
+    connection.commit()
+    connection.close()
