@@ -20,6 +20,10 @@ def add_column_if_missing(cursor, table_name: str, column_name: str, column_sql:
         cursor.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_sql}")
 
 
+def split_digital_items(digital_content: str) -> list[str]:
+    return [line.strip() for line in digital_content.splitlines() if line.strip()]
+
+
 def init_db():
     connection = get_connection()
     cursor = connection.cursor()
@@ -50,8 +54,20 @@ def init_db():
         )
     """)
 
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS digital_items (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            product_id INTEGER NOT NULL,
+            content TEXT NOT NULL,
+            is_used INTEGER DEFAULT 0,
+            used_order_id INTEGER,
+            used_at TIMESTAMP
+        )
+    """)
+
     add_column_if_missing(cursor, "products", "digital_content", "digital_content TEXT")
     add_column_if_missing(cursor, "orders", "digital_content", "digital_content TEXT")
+    add_column_if_missing(cursor, "orders", "delivered_content", "delivered_content TEXT")
 
     connection.commit()
     connection.close()
@@ -75,8 +91,21 @@ def add_product(
         (name, category, description, price, digital_content),
     )
 
+    product_id = cursor.lastrowid
+
+    for item in split_digital_items(digital_content):
+        cursor.execute(
+            """
+            INSERT INTO digital_items (product_id, content)
+            VALUES (?, ?)
+            """,
+            (product_id, item),
+        )
+
     connection.commit()
     connection.close()
+
+    return product_id
 
 
 def get_all_products():
@@ -116,6 +145,25 @@ def get_product_by_id(product_id: int):
     connection.close()
 
     return product
+
+
+def get_available_digital_count(product_id: int) -> int:
+    connection = get_connection()
+    cursor = connection.cursor()
+
+    cursor.execute(
+        """
+        SELECT COUNT(*)
+        FROM digital_items
+        WHERE product_id = ? AND is_used = 0
+        """,
+        (product_id,),
+    )
+
+    count = cursor.fetchone()[0]
+    connection.close()
+
+    return count
 
 
 def delete_product(product_id: int):
@@ -190,6 +238,7 @@ def get_all_orders(limit: int = 20):
         """
         SELECT
             id,
+            product_id,
             product_name,
             product_price,
             buyer_telegram_id,
@@ -197,7 +246,7 @@ def get_all_orders(limit: int = 20):
             buyer_full_name,
             status,
             created_at,
-            digital_content
+            delivered_content
         FROM orders
         ORDER BY id DESC
         LIMIT ?
@@ -219,6 +268,7 @@ def get_order_by_id(order_id: int):
         """
         SELECT
             id,
+            product_id,
             product_name,
             product_price,
             buyer_telegram_id,
@@ -226,7 +276,7 @@ def get_order_by_id(order_id: int):
             buyer_full_name,
             status,
             created_at,
-            digital_content
+            delivered_content
         FROM orders
         WHERE id = ?
         """,
@@ -239,17 +289,71 @@ def get_order_by_id(order_id: int):
     return order
 
 
-def mark_order_done(order_id: int):
+def take_next_digital_item(product_id: int, order_id: int):
+    connection = get_connection()
+    cursor = connection.cursor()
+
+    cursor.execute("BEGIN IMMEDIATE")
+
+    cursor.execute(
+        """
+        SELECT id, content
+        FROM digital_items
+        WHERE product_id = ? AND is_used = 0
+        ORDER BY id ASC
+        LIMIT 1
+        """,
+        (product_id,),
+    )
+
+    item = cursor.fetchone()
+
+    if not item:
+        connection.rollback()
+        connection.close()
+        return None
+
+    item_id, content = item
+
+    cursor.execute(
+        """
+        UPDATE digital_items
+        SET is_used = 1,
+            used_order_id = ?,
+            used_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+        """,
+        (order_id, item_id),
+    )
+
+    cursor.execute(
+        """
+        UPDATE orders
+        SET delivered_content = ?,
+            status = 'done'
+        WHERE id = ?
+        """,
+        (content, order_id),
+    )
+
+    connection.commit()
+    connection.close()
+
+    return content
+
+
+def mark_order_done(order_id: int, delivered_content: str = ""):
     connection = get_connection()
     cursor = connection.cursor()
 
     cursor.execute(
         """
         UPDATE orders
-        SET status = 'done'
+        SET status = 'done',
+            delivered_content = COALESCE(NULLIF(?, ''), delivered_content)
         WHERE id = ?
         """,
-        (order_id,),
+        (delivered_content, order_id),
     )
 
     connection.commit()
