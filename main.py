@@ -3,10 +3,23 @@ import os
 
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command, CommandStart
-from aiogram.types import KeyboardButton, ReplyKeyboardMarkup
+from aiogram.types import (
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    KeyboardButton,
+    ReplyKeyboardMarkup,
+)
 from dotenv import load_dotenv
 
-from database.db import add_product, init_db, get_all_products, delete_product
+from database.db import (
+    add_product,
+    create_order,
+    delete_product,
+    get_all_orders,
+    get_all_products,
+    get_product_by_id,
+    init_db,
+)
 
 
 load_dotenv()
@@ -18,6 +31,7 @@ ADMIN_IDS = [
     for x in os.getenv("ADMIN_IDS", "").split(",")
     if x.strip()
 ]
+
 
 dp = Dispatcher()
 add_product_states = {}
@@ -77,8 +91,78 @@ def is_admin(user_id: int) -> bool:
 
 
 def cancel_add_product(user_id: int):
-    if user_id in add_product_states:
-        del add_product_states[user_id]
+    add_product_states.pop(user_id, None)
+
+
+def build_product_text(product) -> str:
+    product_id, name, category, description, price = product
+    return (
+        f"📦 <b>{name}</b>\n\n"
+        f"🆔 ID: {product_id}\n"
+        f"📂 Категория: {category}\n"
+        f"💰 Цена: {price} ₽\n"
+        f"📝 Описание: {description or '-'}"
+    )
+
+
+def buy_keyboard(product_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="🛒 Купить",
+                    callback_data=f"buy:{product_id}",
+                )
+            ]
+        ]
+    )
+
+
+async def send_catalog(message: types.Message):
+    products = get_all_products()
+
+    if not products:
+        await message.answer(
+            "📦 Сейчас товаров в наличии нет.",
+            reply_markup=main_menu,
+        )
+        return
+
+    await message.answer("📦 Товары в наличии:", reply_markup=main_menu)
+
+    for product in products:
+        product_id = product[0]
+        await message.answer(
+            build_product_text(product),
+            parse_mode="HTML",
+            reply_markup=buy_keyboard(product_id),
+        )
+
+
+def build_order_text(order) -> str:
+    (
+        order_id,
+        product_name,
+        product_price,
+        buyer_telegram_id,
+        buyer_username,
+        buyer_full_name,
+        status,
+        created_at,
+    ) = order
+
+    username_text = f"@{buyer_username}" if buyer_username else "-"
+
+    return (
+        f"🧾 Заказ #{order_id}\n"
+        f"📦 Товар: {product_name}\n"
+        f"💰 Цена: {product_price} ₽\n"
+        f"👤 Покупатель: {buyer_full_name or '-'}\n"
+        f"🔗 Username: {username_text}\n"
+        f"🆔 Telegram ID: {buyer_telegram_id}\n"
+        f"📌 Статус: {status}\n"
+        f"🕒 Создан: {created_at}"
+    )
 
 
 @dp.message(CommandStart())
@@ -112,29 +196,7 @@ async def get_id(message: types.Message):
 
 @dp.message(Command("catalog"))
 async def catalog(message: types.Message):
-    products = get_all_products()
-
-    if not products:
-        await message.answer(
-            "📦 Сейчас товаров в наличии нет.",
-            reply_markup=main_menu,
-        )
-        return
-
-    catalog_text = "📦 Товары в наличии:\n\n"
-
-    for product in products:
-        product_id, name, category, description, price = product
-
-        catalog_text += (
-            f"🆔 {product_id}\n"
-            f"📌 {name}\n"
-            f"📂 {category}\n"
-            f"💰 {price} ₽\n"
-            f"📝 {description or '-'}\n\n"
-        )
-
-    await message.answer(catalog_text, reply_markup=main_menu)
+    await send_catalog(message)
 
 
 @dp.message(Command("admin"))
@@ -207,32 +269,7 @@ async def all_products_button(message: types.Message):
         await message.answer("⛔ У тебя нет доступа к этой функции.")
         return
 
-    products = get_all_products()
-
-    if not products:
-        await message.answer(
-            "📦 В базе пока нет товаров.",
-            reply_markup=admin_menu,
-        )
-        return
-
-    text = "📦 Список товаров:\n\n"
-
-    for product in products:
-        product_id, name, category, description, price = product
-
-        text += (
-            f"🆔 {product_id}\n"
-            f"📌 {name}\n"
-            f"📂 {category}\n"
-            f"💰 {price} ₽\n"
-            f"📝 {description or '-'}\n\n"
-        )
-
-    await message.answer(
-        text,
-        reply_markup=admin_menu,
-    )
+    await send_catalog(message)
 
 
 @dp.message(lambda message: message.text == "🧾 Заказы")
@@ -241,16 +278,76 @@ async def orders_button(message: types.Message):
         await message.answer("⛔ У тебя нет доступа к этой функции.")
         return
 
-    await message.answer(
-        "🧾 Заказов пока нет.",
-        reply_markup=admin_menu,
-    )
+    orders = get_all_orders()
+
+    if not orders:
+        await message.answer(
+            "🧾 Заказов пока нет.",
+            reply_markup=admin_menu,
+        )
+        return
+
+    await message.answer("🧾 Последние заказы:", reply_markup=admin_menu)
+
+    for order in orders:
+        await message.answer(build_order_text(order), reply_markup=admin_menu)
 
 
 @dp.message(lambda message: message.text == "🏪 Главное меню")
 async def back_to_main_from_admin(message: types.Message):
     cancel_add_product(message.from_user.id)
     await message.answer("🏪 Главное меню:", reply_markup=main_menu)
+
+
+@dp.callback_query(lambda callback: callback.data and callback.data.startswith("buy:"))
+async def buy_product_callback(callback: types.CallbackQuery):
+    product_id = int(callback.data.split(":", 1)[1])
+    product = get_product_by_id(product_id)
+
+    if not product:
+        await callback.answer("Товар уже недоступен.", show_alert=True)
+        return
+
+    user = callback.from_user
+    order_id = create_order(
+        product_id=product_id,
+        buyer_telegram_id=user.id,
+        buyer_username=user.username or "",
+        buyer_full_name=user.full_name or "",
+    )
+
+    if not order_id:
+        await callback.answer("Не удалось создать заказ.", show_alert=True)
+        return
+
+    _, name, _, _, price = product
+
+    await callback.answer("Заказ создан!", show_alert=True)
+    await callback.message.answer(
+        "✅ Заказ создан.\n\n"
+        f"🧾 Номер заказа: #{order_id}\n"
+        f"📦 Товар: {name}\n"
+        f"💰 Цена: {price} ₽\n\n"
+        "Администратор скоро свяжется с тобой для оплаты и выдачи товара.",
+        reply_markup=main_menu,
+    )
+
+    buyer_username = f"@{user.username}" if user.username else "-"
+    admin_text = (
+        "🆕 Новый заказ!\n\n"
+        f"🧾 Заказ: #{order_id}\n"
+        f"📦 Товар: {name}\n"
+        f"💰 Цена: {price} ₽\n"
+        f"👤 Покупатель: {user.full_name}\n"
+        f"🔗 Username: {buyer_username}\n"
+        f"🆔 Telegram ID: {user.id}"
+    )
+
+    for admin_id in ADMIN_IDS:
+        try:
+            await callback.bot.send_message(admin_id, admin_text)
+        except Exception:
+            pass
 
 
 @dp.message()
@@ -356,32 +453,7 @@ async def handle_menu(message: types.Message):
         )
 
     elif text == "📦 Товары":
-        products = get_all_products()
-
-        if not products:
-            await message.answer(
-                "📦 Сейчас товаров в наличии нет.",
-                reply_markup=main_menu,
-            )
-            return
-
-        catalog_text = "📦 Товары в наличии:\n\n"
-
-        for product in products:
-            product_id, name, category, description, price = product
-
-            catalog_text += (
-                f"🆔 {product_id}\n"
-                f"📌 {name}\n"
-                f"📂 {category}\n"
-                f"💰 {price} ₽\n"
-                f"📝 {description or '-'}\n\n"
-            )
-
-        await message.answer(
-            catalog_text,
-            reply_markup=main_menu,
-        )
+        await send_catalog(message)
 
     elif text == "ℹ️ Помощь":
         await message.answer(
