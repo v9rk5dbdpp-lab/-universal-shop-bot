@@ -16,9 +16,11 @@ from database.db import (
     create_order,
     delete_product,
     get_all_orders,
+    get_order_by_id,
     get_all_products,
     get_product_by_id,
     init_db,
+    mark_order_done,
 )
 
 
@@ -95,7 +97,7 @@ def cancel_add_product(user_id: int):
 
 
 def build_product_text(product) -> str:
-    product_id, name, category, description, price = product
+    product_id, name, category, description, price, _digital_content = product
     return (
         f"📦 <b>{name}</b>\n\n"
         f"🆔 ID: {product_id}\n"
@@ -112,6 +114,19 @@ def buy_keyboard(product_id: int) -> InlineKeyboardMarkup:
                 InlineKeyboardButton(
                     text="🛒 Купить",
                     callback_data=f"buy:{product_id}",
+                )
+            ]
+        ]
+    )
+
+
+def delivery_keyboard(order_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="✅ Выдать товар",
+                    callback_data=f"deliver:{order_id}",
                 )
             ]
         ]
@@ -149,9 +164,11 @@ def build_order_text(order) -> str:
         buyer_full_name,
         status,
         created_at,
+        digital_content,
     ) = order
 
     username_text = f"@{buyer_username}" if buyer_username else "-"
+    delivery_text = "есть" if digital_content else "нет"
 
     return (
         f"🧾 Заказ #{order_id}\n"
@@ -161,8 +178,20 @@ def build_order_text(order) -> str:
         f"🔗 Username: {username_text}\n"
         f"🆔 Telegram ID: {buyer_telegram_id}\n"
         f"📌 Статус: {status}\n"
+        f"🔑 Автовыдача: {delivery_text}\n"
         f"🕒 Создан: {created_at}"
     )
+
+
+def order_reply_markup(order):
+    order_id = order[0]
+    status = order[6]
+    digital_content = order[8]
+
+    if digital_content and status != "done":
+        return delivery_keyboard(order_id)
+
+    return None
 
 
 @dp.message(CommandStart())
@@ -290,7 +319,10 @@ async def orders_button(message: types.Message):
     await message.answer("🧾 Последние заказы:", reply_markup=admin_menu)
 
     for order in orders:
-        await message.answer(build_order_text(order), reply_markup=admin_menu)
+        await message.answer(
+            build_order_text(order),
+            reply_markup=order_reply_markup(order),
+        )
 
 
 @dp.message(lambda message: message.text == "🏪 Главное меню")
@@ -320,7 +352,7 @@ async def buy_product_callback(callback: types.CallbackQuery):
         await callback.answer("Не удалось создать заказ.", show_alert=True)
         return
 
-    _, name, _, _, price = product
+    _, name, _, _, price, digital_content = product
 
     await callback.answer("Заказ создан!", show_alert=True)
     await callback.message.answer(
@@ -333,6 +365,7 @@ async def buy_product_callback(callback: types.CallbackQuery):
     )
 
     buyer_username = f"@{user.username}" if user.username else "-"
+    delivery_text = "есть" if digital_content else "нет"
     admin_text = (
         "🆕 Новый заказ!\n\n"
         f"🧾 Заказ: #{order_id}\n"
@@ -340,14 +373,65 @@ async def buy_product_callback(callback: types.CallbackQuery):
         f"💰 Цена: {price} ₽\n"
         f"👤 Покупатель: {user.full_name}\n"
         f"🔗 Username: {buyer_username}\n"
-        f"🆔 Telegram ID: {user.id}"
+        f"🆔 Telegram ID: {user.id}\n"
+        f"🔑 Автовыдача: {delivery_text}"
     )
 
     for admin_id in ADMIN_IDS:
         try:
-            await callback.bot.send_message(admin_id, admin_text)
+            await callback.bot.send_message(
+                admin_id,
+                admin_text,
+                reply_markup=delivery_keyboard(order_id) if digital_content else None,
+            )
         except Exception:
             pass
+
+
+@dp.callback_query(lambda callback: callback.data and callback.data.startswith("deliver:"))
+async def deliver_order_callback(callback: types.CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа.", show_alert=True)
+        return
+
+    order_id = int(callback.data.split(":", 1)[1])
+    order = get_order_by_id(order_id)
+
+    if not order:
+        await callback.answer("Заказ не найден.", show_alert=True)
+        return
+
+    (
+        _order_id,
+        product_name,
+        _product_price,
+        buyer_telegram_id,
+        _buyer_username,
+        _buyer_full_name,
+        status,
+        _created_at,
+        digital_content,
+    ) = order
+
+    if status == "done":
+        await callback.answer("Этот заказ уже выдан.", show_alert=True)
+        return
+
+    if not digital_content:
+        await callback.answer("У этого заказа нет текста для автовыдачи.", show_alert=True)
+        return
+
+    await callback.bot.send_message(
+        buyer_telegram_id,
+        "🎁 Твой товар выдан.\n\n"
+        f"📦 Товар: {product_name}\n\n"
+        f"🔑 Данные:\n{digital_content}",
+    )
+
+    mark_order_done(order_id)
+
+    await callback.answer("Товар выдан покупателю.", show_alert=True)
+    await callback.message.answer(f"✅ Заказ #{order_id} выдан покупателю.")
 
 
 @dp.message()
@@ -408,25 +492,39 @@ async def handle_menu(message: types.Message):
             return
 
         if step == "description":
-            description = "" if text.strip() == "-" else text
+            state["description"] = "" if text.strip() == "-" else text
+            state["step"] = "digital_content"
+
+            await message.answer(
+                "Введите текст для автоматической выдачи товара.\n\n"
+                "Например: код, ключ, аккаунт, VPN-конфиг или ссылка.\n\n"
+                "Если автовыдача не нужна, напишите: -"
+            )
+            return
+
+        if step == "digital_content":
+            digital_content = "" if text.strip() == "-" else text
 
             add_product(
                 name=state["name"],
                 category=state["category"],
                 price=state["price"],
-                description=description,
+                description=state["description"],
+                digital_content=digital_content,
             )
 
             product_name = state["name"]
             product_category = state["category"]
             product_price = state["price"]
+            has_delivery = "да" if digital_content else "нет"
             cancel_add_product(user_id)
 
             await message.answer(
                 "✅ Товар добавлен в базу данных.\n\n"
                 f"Название: {product_name}\n"
                 f"Категория: {product_category}\n"
-                f"Цена: {product_price}",
+                f"Цена: {product_price}\n"
+                f"Автовыдача: {has_delivery}",
                 reply_markup=admin_menu,
             )
             return
